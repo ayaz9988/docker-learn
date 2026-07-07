@@ -103,7 +103,7 @@ TypeScript, Express, SQLite, Redis, ioredis, Docker, Swarm, GitHub Actions
 - Container registry management & image signing
 
 #### Payments
-- Stripe — checkout sessions, subscriptions, webhooks, invoicing
+- Stripe — checkout sessions, subscriptions, webhooks, invoicing (not available in Syria)
 
 #### Security
 - OAuth2 / OIDC (Keycloak, Auth0)
