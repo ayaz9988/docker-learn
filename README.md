@@ -39,9 +39,6 @@ TypeScript, Express, SQLite, Redis, ioredis, Docker, Swarm, GitHub Actions
 | Auth | JWT, better-auth, session management |
 | File uploads | Multer |
 | Real-time | Socket.io, WebSockets |
-| Job queues | BullMQ |
-| AI integration | OpenAI, Pinecone vector search |
-| Payments | Stripe |
 | Logging | Winston, Pino, daily rotation |
 | Validation | Zod, middleware |
 | Containerization | Dockerfiles, multi-stage, slim images, healthchecks |
@@ -72,6 +69,8 @@ TypeScript, Express, SQLite, Redis, ioredis, Docker, Swarm, GitHub Actions
 - **Circuit Breaker, Bulkhead, Retry** — resilience patterns
 - **Idempotency** — safe retries
 - **Rate limiting at scale** — token bucket, sliding window
+- **Job/Message queues** — BullMQ, Kafka, RabbitMQ
+- **AI integration** — OpenAI, Pinecone, vector search patterns
 
 #### Microservices
 - Service decomposition & communication (sync vs async)
@@ -85,6 +84,8 @@ TypeScript, Express, SQLite, Redis, ioredis, Docker, Swarm, GitHub Actions
 - **Kubernetes** — pods, deployments, services, ingress (Swarm was step 1, K8s is step 2)
 - **Helm** — package management for K8s
 - **AWS** — ECS, RDS, ElastiCache, CloudFront, VPC design
+- **S3 presigned URLs** — secure file uploads/downloads
+- **Cloudinary signed URLs** — media uploads
 - **Auto-scaling** — horizontal pod autoscaling, cluster autoscaler
 
 #### Monitoring & Observability
@@ -101,8 +102,12 @@ TypeScript, Express, SQLite, Redis, ioredis, Docker, Swarm, GitHub Actions
 - GitOps (ArgoCD, Flux)
 - Container registry management & image signing
 
+#### Payments
+- Stripe — checkout sessions, subscriptions, webhooks, invoicing
+
 #### Security
 - OAuth2 / OIDC (Keycloak, Auth0)
+- OTP / verification codes
 - Secret rotation (Vault, AWS Secrets Manager)
 - CSP, CORS hardening
 - SQL injection & XSS prevention at scale
