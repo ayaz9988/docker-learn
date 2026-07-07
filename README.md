@@ -60,7 +60,6 @@ TypeScript, Express, SQLite, Redis, ioredis, Docker, Swarm, GitHub Actions
 - Benchmarking & bottleneck analysis
 
 #### Databases & Data
-- Query optimization & EXPLAIN plans
 - Connection pooling (PgBouncer)
 - Read replicas, sharding
 - Migration strategies (zero-downtime)
@@ -108,11 +107,3 @@ TypeScript, Express, SQLite, Redis, ioredis, Docker, Swarm, GitHub Actions
 - CSP, CORS hardening
 - SQL injection & XSS prevention at scale
 - Supply chain security (SBOM, container scanning)
-
-#### Soft Skills (the senior differentiator)
-- **ADRs** (Architecture Decision Records) — documenting why
-- **Tech specs** — writing clear design documents
-- **Code reviews** — reviewing with context, not just syntax
-- **Incident response** — postmortems, runbooks
-- **Mentoring** — helping others grow
-- **Saying "no"** — pushing back on scope creep with data
