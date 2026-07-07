@@ -14,16 +14,18 @@ My personal repo for learning backend infrastructure with Docker.
 
 TypeScript, Express, SQLite, Redis, ioredis, Docker, Swarm, GitHub Actions
 
-## Projects across repos
+## Projects
 
-| Project | Stack |
-|---------|-------|
-| backend_complaints_block_5 | Express 5, Prisma, PostgreSQL, Zod, JWT, Docker |
-| job-board | Express 5, Drizzle, PostgreSQL, better-auth, Zod, Winston |
-| lms-portal-backend | Express 4, PostgreSQL, Socket.io, BullMQ, OpenAI, Stripe |
-| lms-portal-interface | Next.js 14, React, Tailwind, MUI |
-| virtualoffice | Express 4, React, SQLite, Zustand, Zoom SDK |
-| docker-learn | Express 4, SQLite, Redis, Docker, Swarm |
+| Project | Stack | Notes |
+|---------|-------|-------|
+| backend_complaints_block_5 | Express 5, Prisma, PostgreSQL, Zod, JWT, Docker | Personal |
+| job-board | Express 5, Drizzle, PostgreSQL, better-auth, Zod, Winston | Personal |
+| virtualoffice | Express 4, React, SQLite, Zustand, Zoom SDK | Personal |
+| docker-learn | Express 4, SQLite, Redis, Docker, Swarm | Personal |
+| lms-portal-backend | Express 4, PostgreSQL, Socket.io, BullMQ, OpenAI, Stripe | Contributing — reports/students features, caching, notifications |
+| lms-portal-interface | Next.js 14, React, Tailwind, MUI | Contributing — student reports UI, filters, routing, fixes |
+| aws-s3-signed-urls | TypeScript, AWS SDK v3 | Learning |
+| cloudinary-signed-urls | TypeScript, Cloudinary SDK | Learning |
 
 ## Path to senior backend
 
