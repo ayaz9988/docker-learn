@@ -23,7 +23,6 @@ TypeScript, Express, SQLite, Redis, ioredis, Docker, Swarm, GitHub Actions
 | lms-portal-backend | Express 4, PostgreSQL, Socket.io, BullMQ, OpenAI, Stripe |
 | lms-portal-interface | Next.js 14, React, Tailwind, MUI |
 | virtualoffice | Express 4, React, SQLite, Zustand, Zoom SDK |
-| aws-s3-signed-urls | TypeScript, AWS SDK v3 |
 | docker-learn | Express 4, SQLite, Redis, Docker, Swarm |
 
 ## Path to senior backend
