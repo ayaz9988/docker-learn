@@ -36,8 +36,8 @@ TypeScript, Express, SQLite, Redis, ioredis, Docker, Swarm, GitHub Actions
 | REST APIs | Express 4/5, routing, middleware, error handling |
 | Databases | SQLite, PostgreSQL, Prisma, Drizzle, raw SQL |
 | Caching | Redis, ioredis, cache invalidation |
-| Auth | JWT, better-auth, OTP, session management |
-| File uploads | Multer, S3 presigned URLs, Cloudinary signed URLs |
+| Auth | JWT, better-auth, session management |
+| File uploads | Multer |
 | Real-time | Socket.io, WebSockets |
 | Job queues | BullMQ |
 | AI integration | OpenAI, Pinecone vector search |
