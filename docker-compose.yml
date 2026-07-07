@@ -1,0 +1,327 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# docker-compose.yml — Multi-service: Node.js API + Redis + Nginx
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# ── Profiles (modes) ─────────────────────────────────────────────────────────
+# This file defines TWO modes using Compose "profiles":
+#
+#   Dev mode (--profile dev):
+#     docker compose --profile dev up -d
+#     ├── redis        — cache (always on)
+#     ├── api          — Node.js app on localhost:3000 (direct access)
+#     └── redis-commander — Redis web UI on localhost:8081
+#
+#   Prod mode (--profile prod):
+#     docker compose --profile prod up -d
+#     ├── redis        — cache (always on)
+#     ├── api          — Node.js app (internal)
+#     └── nginx        — reverse proxy on localhost:8080 (entry point)
+#
+#   Services with no profile (redis) always start regardless of --profile.
+#   Services with a profile only start when that profile is active.
+#
+# Architecture:
+#   Dev:  │ Host │ ──:3000──→ │ api │ ──:6379──→ │ redis │
+#                └──:8081──→ │ redis-commander │
+#
+#   Prod: │ Host │ ──:8080──→ │ nginx │ ──:3000──→ │ api │ ──:6379──→ │ redis │
+#                              (public)              (private)        (private)
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── Docker Networking — How services find each other ──────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Compose creates a bridge network named <project>_default. Every container
+# joins it. Containers reach each other using the SERVICE NAME as hostname:
+#
+#   - nginx.conf proxy_pass → http://api:3000    ("api" = service name)
+#   - app REDIS_URL         → redis://redis:6379 ("redis" = service name)
+#
+# ── Isolation with custom networks ─────────────────────────────────────────
+# For better security, use multiple networks to segment traffic:
+#
+#   services:
+#     redis:  networks: [backend]
+#     api:    networks: [backend, frontend]
+#     nginx:  networks: [frontend]
+#
+#   networks: { backend: {}, frontend: {} }
+#
+# Now nginx can't reach redis even if compromised.
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── Resource Limits — Why and how ─────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Without limits, a single container can consume ALL host CPU/memory, starving
+# other containers or the host OS itself. This causes outages.
+#
+# Two levels of limits:
+#
+#   limits:       HARD ceiling — container can NEVER exceed this
+#                 - CPU exceeded → container is throttled (slower, not killed)
+#                 - Memory exceeded → container is OOM-killed
+#
+#   reservations: SOFT floor — Docker guarantees this much is available
+#                 - Scheduler ensures the host has enough free resources
+#                 - Useful for critical services that need minimum resources
+#
+# These limits only take effect in SWARM MODE or with "docker compose --compatibility".
+# For local "docker compose" (without --compatibility), use the flat keys:
+#   mem_limit: 256m
+#   cpus: "0.5"
+#
+# The deploy.resources.limits block is kept in addition for compatibility
+# with both local compose (--compatibility) and future swarm deployment.
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── Logging — Why and how ─────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Docker captures stdout/stderr from each container. By default it logs to
+# a JSON file with NO SIZE LIMIT — a container that logs heavily can fill
+# your entire disk.
+#
+# Common logging drivers:
+#   driver: "json-file"     Default — writes JSON logs to /var/lib/docker/...
+#   driver: "local"         Faster, uses binary format, no options needed
+#   driver: "journald"      Send to systemd journal
+#   driver: "gelf"          Send to Graylog / Grafana Loki
+#   driver: "fluentd"       Send to Fluentd for routing to Elastic, S3, etc.
+#   driver: "awslogs"       Send to Amazon CloudWatch
+#   driver: "syslog"        Send to local/remote syslog
+#
+# Options explained:
+#   max-size: "10m"    — Rotate log file when it reaches 10 MB
+#   max-file: "3"      — Keep 3 rotated files (current + 2 old)
+#   compress: "true"   — gzip old log files (saves ~90% space)
+#
+# Without these, a chatty container could use GBs of disk in hours.
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── depends_on ─────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Controls STARTUP ORDER only. It does NOT:
+#   - Wait for the service to be ready (use healthcheck + condition)
+#   - Control network access
+#   - Imply any security boundary
+#
+# Three conditions:
+#   service_started               — wait until container starts (default)
+#   service_healthy               — wait until healthcheck passes
+#   service_completed_successfully — wait until container exits 0
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+
+services:
+
+  # ── redis ──────────────────────────────────────────────────────────────────
+  # Always starts (no profile). In-memory cache used by the API.
+  # No host ports — purely internal.
+  redis:
+    image: redis:7-alpine
+    container_name: task-redis
+    restart: unless-stopped
+
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+
+    # ── Resource limits ──────────────────────────────────────────────────
+    # Flat keys work with local "docker compose" (no --compatibility needed).
+    # Redis is lightweight — 256 MB is generous for a dev cache.
+    mem_limit: 256m
+    cpus: "0.5"
+
+    # deploy section is for swarm mode; ignored by local compose.
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+
+    # ── Logging ──────────────────────────────────────────────────────────
+    # json-file driver with rotation at 10 MB, keep 3 files.
+    # Prevents disk from filling up if Redis logs are verbose.
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ── api ────────────────────────────────────────────────────────────────────
+  # Node.js/Express app with SQLite + Redis caching.
+  # Active in both dev and prod profiles.
+  api:
+    profiles:
+      - dev
+      - prod
+    build: .
+    container_name: task-api
+    restart: unless-stopped
+
+    ports:
+      - "3000:3000"
+
+    environment:
+      REDIS_URL: redis://redis:6379
+
+    volumes:
+      - task-data:/app/data
+
+    # ── Resource limits ──────────────────────────────────────────────────
+    # The app is I/O bound (reading SQLite). 512 MB and 0.7 CPU is safe.
+    # Increase if you add image processing or file uploads.
+    mem_limit: 512m
+    cpus: "0.7"
+
+    deploy:
+      resources:
+        limits:
+          cpus: "0.7"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 128M
+
+    # ── Logging ──────────────────────────────────────────────────────────
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    depends_on:
+      redis:
+        condition: service_healthy
+
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/').then(r => process.exit(r.ok?0:1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ── nginx ──────────────────────────────────────────────────────────────────
+  # PROD ONLY reverse proxy. Rate limiting (10 req/s, burst 20) + entry point.
+  nginx:
+    profiles:
+      - prod
+    image: nginx:alpine
+    container_name: task-nginx
+    restart: unless-stopped
+
+    ports:
+      - "8080:80"
+
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf
+
+    # ── Resource limits ──────────────────────────────────────────────────
+    # Nginx is extremely efficient. 256 MB handles thousands of connections.
+    mem_limit: 256m
+    cpus: "0.5"
+
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+
+    # ── Logging ──────────────────────────────────────────────────────────
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    depends_on:
+      - api
+
+  # ── redis-commander ────────────────────────────────────────────────────────
+  # DEV ONLY web GUI for Redis. Browse keys, inspect values, debug cache.
+  redis-commander:
+    profiles:
+      - dev
+    image: rediscommander/redis-commander:latest
+    container_name: task-redis-commander
+    restart: unless-stopped
+
+    environment:
+      REDIS_HOSTS: local:redis:6379
+
+    ports:
+      - "8081:8081"
+
+    # ── Resource limits ──────────────────────────────────────────────────
+    # Lightweight Node.js app serving a web UI. 256 MB is plenty.
+    mem_limit: 256m
+    cpus: "0.3"
+
+    deploy:
+      resources:
+        limits:
+          cpus: "0.3"
+          memory: 256M
+
+    # ── Logging ──────────────────────────────────────────────────────────
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    depends_on:
+      - redis
+
+# ── volumes ─────────────────────────────────────────────────────────────────
+volumes:
+  task-data:
+  redis-data:
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# How to test resource limits
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# With --compatibility flag (enables deploy.resources locally):
+#   docker compose --profile dev --compatibility up -d
+#
+# Check applied limits:
+#   docker inspect task-api --format '{{.HostConfig.Memory}} {{.HostConfig.NanoCpus}}'
+#
+# Stress-test memory limit (will be OOM-killed at 512 MB):
+#   docker compose exec api node -e "const a = []; while(true) a.push('x'.repeat(1024*1024))"
+#
+# Stress-test CPU limit (will be throttled to ~70% of one core):
+#   docker compose exec api node -e "while(true) Math.random() * Math.random()"
+#   watch -n 1 docker stats task-api
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+# Command reference
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+#   docker compose --profile dev up -d              Start dev mode
+#   docker compose --profile prod up -d             Start prod mode
+#   docker compose --profile dev --compatibility up -d  Dev mode WITH limits
+#   docker compose down                             Stop + remove containers
+#   docker compose down -v                          Also remove volumes
+#   docker compose logs -f                          Follow all logs
+#   docker compose logs api                         Logs from a specific service
+#   docker compose ps                               Show status
+#   docker compose exec api sh                      Open shell in api container
+#   docker compose exec redis redis-cli             Redis CLI
+#   docker compose build                            Rebuild images
+#   docker compose up -d --build                    Rebuild + start
+#   docker stats                                    Live resource usage of all containers
+#
+# Ports:
+#   :3000 — api (dev + prod)
+#   :8080 — nginx (prod only)
+#   :8081 — redis-commander (dev only)
+# ═══════════════════════════════════════════════════════════════════════════════

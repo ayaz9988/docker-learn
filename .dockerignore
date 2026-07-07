@@ -1,0 +1,108 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# .dockerignore
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Purpose: tells Docker which files to EXCLUDE from the build context.
+#
+# The build context is the directory sent to the Docker daemon when you run
+# "docker build ." or Compose's "build: .". If this file didn't exist, the
+# ENTIRE project directory (including node_modules, .git, etc.) would be
+# packed up and sent to the daemon every time you build.
+#
+# Why this matters:
+#   1. Speed — sending 500 MB of node_modules over a socket is slow
+#   2. Cache invalidation — if node_modules changes, Docker invalidates
+#      the COPY layer, even if package.json didn't change
+#   3. Reproducibility — host machine artifacts (local .env, OS metadata)
+#      shouldn't leak into the Docker build
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+# ── Dependencies ────────────────────────────────────────────────────────────
+# Never send node_modules to the Docker daemon. The image installs its own
+# inside the build (RUN npm ci). Sending host node_modules would:
+#   - Bloat the build context by hundreds of MB
+#   - Cause cache misses on unrelated changes
+#   - Potentially copy OS-specific binaries that won't work in the container
+node_modules
+
+# ── Build output ────────────────────────────────────────────────────────────
+# dist/ is produced by "npm run build" during the Docker build.
+# If you built locally before running docker build, the host dist/ would be
+# copied and then overwritten by the build stage anyway — wasted I/O.
+# Excluding it keeps the build context smaller.
+dist
+
+# ── Local database ──────────────────────────────────────────────────────────
+# SQLite database files from local development should not be baked into the
+# image. The container creates its own database at /app/data/data.db via a
+# volume mount.
+data.db
+*.db
+
+# ── Environment files ───────────────────────────────────────────────────────
+# .env files contain secrets (database passwords, API keys, tokens).
+# NEVER let them into an image! They could end up in a registry.
+# Use Docker secrets, environment variables at runtime, or a volume-mounted
+# .env file instead.
+.env
+.env.*
+!.env.example   # exception: keep .env.example (it's a template)
+
+# ── Version control ─────────────────────────────────────────────────────────
+# Git history adds megabytes and isn't needed at runtime.
+# Also prevents .git directory permission issues in the build.
+.git
+.gitignore
+.gitattributes
+.gitkeep
+
+# ── IDE / editor config files ───────────────────────────────────────────────
+# Personal editor settings should never be in the build context.
+# They vary per developer and are meaningless to the app.
+.vscode
+.idea
+*.swp
+*.swo
+*~
+.DS_Store       # macOS metadata
+Thumbs.db       # Windows thumbnail cache
+
+# ── Logs & debug files ─────────────────────────────────────────────────────
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# ── Test coverage ──────────────────────────────────────────────────────────
+coverage
+.nyc_output
+
+# ── Misc cache directories ──────────────────────────────────────────────────
+.pnpm-store     # pnpm cache (if using pnpm)
+.npm            # npm cache
+.cache
+.turbo          # Turborepo cache
+.next           # Next.js build
+.nuxt           # Nuxt build
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── .dockerignore patterns quick reference ────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# node_modules       — matches any file/dir named "node_modules" at any depth
+# .env               — matches any file named ".env" at any depth
+# dist/              — matches a "dist" directory at any depth
+# *.db               — matches any .db file at any depth
+# !.env.example      — exception: DON'T ignore .env.example (the ! reverses)
+# **/logs            — matches logs/ at any depth (already covered without **)
+#
+# Docker uses Go's filepath.Match rules. Key differences from .gitignore:
+#   - * does NOT cross directory boundaries (use ** for that)
+#   - Leading / anchors to the root of the build context
+#   - / at the end matches directories only
+#   - ! negates a pattern (include instead of exclude)
+#
+# ═══════════════════════════════════════════════════════════════════════════════

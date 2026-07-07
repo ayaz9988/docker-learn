@@ -1,0 +1,374 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# ci.yml — CI/CD pipeline: build Docker image + push to GitHub Container Registry
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# ── What is GitHub Actions? ─────────────────────────────────────────────────
+# GitHub Actions is a CI/CD system built into GitHub. Workflows are YAML files
+# inside .github/workflows/. When a trigger event fires (push, PR, schedule),
+# GitHub spins up a runner (VM), checks out your code, and runs your steps.
+#
+# ── Why push to GHCR and not Docker Hub? ────────────────────────────────────
+# GHCR (ghcr.io) is GitHub's built-in container registry. It's free, private,
+# and uses the GITHUB_TOKEN that GitHub auto-generates per workflow run. No
+# extra signup or credentials needed — the token just works.
+#
+# ── Why not run npm install / npm test on the runner? ────────────────────────
+# Our Dockerfile is multi-stage — it installs dependencies, runs tsc, and
+# produces a minimal production image. The Docker build IS the build step.
+# Running npm install on the runner separately would just duplicate work.
+# If we want tests, we run them INSIDE the Docker build (or use docker compose).
+#
+# ── Architecture ────────────────────────────────────────────────────────────
+#   Push to main
+#     ↓
+#   GitHub Actions runner (ubuntu-latest)
+#     ├── Checkout code
+#     ├── Log in to GHCR (using GITHUB_TOKEN)
+#     ├── Build Docker image (two tags: :latest + :sha-XXXXXXX)
+#     ├── Push both tags to ghcr.io
+#     └── (future: SSH into server → docker stack deploy)
+#           ↓
+#   Swarm pulls new image → rolling update
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+
+name: CI/CD Pipeline
+
+# ── Trigger ─────────────────────────────────────────────────────────────────
+# The workflow runs on every push to main AND every pull request targeting main.
+# The "on" block defines which events start the workflow.
+#
+# Two separate triggers:
+#   push:         Code merged to main → build + push + deploy
+#   pull_request: Someone opens a PR → build only (no push, no deploy)
+#
+# Why both? PRs verify the Dockerfile still works before merge. Only the push
+# to main actually pushes to the registry and deploys.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# ── Jobs ────────────────────────────────────────────────────────────────────
+# A workflow contains one or more jobs. Jobs run in PARALLEL by default. Each
+# job runs on its own VM. If you need sequential jobs (deploy after push), use
+# "needs:" to chain them.
+#
+# This workflow has ONE job. When we add deploy, we'll split into two jobs:
+#   build-and-push  (no "needs")
+#   deploy          (needs: build-and-push)
+jobs:
+  build-and-push:
+    # ── Runner ──────────────────────────────────────────────────────────────
+    # The VM that runs the job. ubuntu-latest is the standard Linux runner.
+    # Docker and Docker Compose come pre-installed.
+    runs-on: ubuntu-latest
+
+    # ── Permissions (GITHUB_TOKEN scopes) ───────────────────────────────────
+    # Every workflow run gets an auto-generated GITHUB_TOKEN. By default, this
+    # token has READ-ONLY access to the repository. The permissions block lets
+    # you GRANT additional scopes.
+    #
+    # ── Why you need to set them ──────────────────────────────────────────
+    # Without the right permissions, your steps will fail with 403 Forbidden.
+    # For example, pushing to GHCR requires "packages: write". Without it,
+    # docker push fails with "denied: access forbidden".
+    #
+    # ── Available permission scopes ───────────────────────────────────────
+    # Each scope can be: read, write, or none
+    #
+    #   Scope           | Default | Use when you need to...
+    #   ────────────────|─────────|──────────────────────────────────────────
+    #   actions         | write*  | Manage workflow runs (cancel, rerun)
+    #   attestations    | write*  | Create artifact attestations (sign build
+    #                  |         | metadata for supply chain security)
+    #   checks          | write*  | Create/update check runs (test status UI)
+    #   contents        | write*  | Read repo code + push commits/tags
+    #   deployments     | write*  | Create deployment statuses (GitHub Pages)
+    #   discussions     | write*  | Manage repo discussions
+    #   id-token        | none    | Request OpenID Connect token (cloud auth
+    #                  |         | without storing secrets — AWS, GCP, Azure)
+    #   issues          | write*  | Create/edit issues
+    #   packages        | write*  | Push/publish to GHCR (Docker images)
+    #   pages           | write*  | Deploy GitHub Pages
+    #   pull-requests   | write*  | Create/edit PRs, add labels/comments
+    #   repository-projects | write* | Manage project boards
+    #   security-events | write*  | Upload SARIF results (code scanning)
+    #   statuses        | write*  | Create commit statuses (CI pass/fail)
+    #
+    #   * write is the default only for repos created in personal accounts
+    #     OR when using the default token in a private repo. For org repos
+    #     and public repos with the "Restrict GITHUB_TOKEN permissions"
+    #     setting enabled, the default is read for most scopes.
+    #
+    # ── What we use in this file ──────────────────────────────────────────
+    #   contents: read   — actions/checkout needs this to pull the code
+    #   packages: write  — docker push needs this to publish to ghcr.io
+    #
+    # ── Common combinations ───────────────────────────────────────────────
+    #   Just CI (test + build, no deploy):
+    #     permissions: {}
+    #     → Token is read-only, which is enough for checkout + npm test
+    #
+    #   CI + push to GHCR:
+    #     permissions: { contents: read, packages: write }
+    #     → Read code, push Docker images (this file's setup)
+    #
+    #   CI + create release + push tag + publish package:
+    #     permissions: { contents: write, packages: write }
+    #     → contents: write allows git tag + release creation
+    #
+    #   CI + cloud deploy (AWS/GCP/Azure via OIDC):
+    #     permissions: { id-token: write, contents: read }
+    #     → id-token lets you request a short-lived cloud credential
+    #     → No long-lived secrets stored in GitHub!
+    #
+    #   Everything (full access):
+    #     permissions: write-all
+    #     → Shorthand that grants write to ALL scopes
+    #     → Use only if you know what you're doing — overly permissive
+    #
+    # Note: permissions are set PER-JOB. Different jobs can have different
+    # scopes. For example, a "lint" job might have no permissions at all
+    # (read-only), while a "deploy" job needs contents: write + packages: write.
+    permissions:
+      contents: read
+      packages: write
+
+    # ── Steps ───────────────────────────────────────────────────────────────
+    # Steps run SEQUENTIALLY. Each step is either:
+    #   uses:  — a pre-built action from the GitHub Marketplace
+    #   run:   — a raw shell command inside the runner
+    steps:
+      # ── Step 1: Checkout ───────────────────────────────────────────────
+      # actions/checkout downloads your code onto the runner.
+      # Without this, the runner would have nothing to build.
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ── Step 2: Log in to GHCR ─────────────────────────────────────────
+      # docker/login-action authenticates the Docker CLI with a registry.
+      # The credentials are:
+      #   username: ${{ github.actor }}  — the GitHub user who triggered the run
+      #   password: ${{ secrets.GITHUB_TOKEN }} — auto-generated token per run
+      #
+      # secrets.GITHUB_TOKEN is ALWAYS available — you don't need to create it.
+      # The permissions block above ensures it has write access to packages.
+      #
+      # After this step, any "docker push" command will be authenticated.
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── Step 3: Build + tag Docker image ───────────────────────────────
+      # We tag the image with TWO tags:
+      #
+      #   ghcr.io/USERNAME/task-api:latest
+      #     → Always points to the latest commit on main
+      #     → Convenient for local dev: docker pull ghcr.io/.../task-api:latest
+      #     → But if something goes wrong, you don't know WHICH commit it is
+      #
+      #   ghcr.io/USERNAME/task-api:sha-abc1234
+      #     → Unique per commit (first 7 chars of the Git SHA)
+      #     → Enables ROLLBACK: you can deploy a specific old commit by tag
+      #     → docker pull ghcr.io/.../task-api:sha-abc1234
+      #
+      # ${{ github.repository_owner }}
+      #     → Your GitHub username (lowercased automatically)
+      #
+      # ${{ github.sha }}
+      #     → The full 40-character commit hash
+      #     → We take first 7 chars with sha-${GITHUB_SHA::7}
+      #
+      # This step only runs on push to main (not PRs), but we'll let it always
+      # run for now — PR builds will fail at "docker push" if we're not
+      # authenticated or the branch isn't main. That's fine: we want PRs to at
+      # least verify the image builds.
+      - name: Build and tag Docker image
+        run: |
+          IMAGE_NAME=ghcr.io/${{ github.repository_owner }}/task-api
+          docker build -t $IMAGE_NAME:latest .
+          docker tag $IMAGE_NAME:latest $IMAGE_NAME:sha-${GITHUB_SHA::7}
+
+      # ── Step 3b: Optionally run tests ──────────────────────────────────
+      # If we add tests later, uncomment this. It runs inside the built image
+      # using docker compose (the compose file mounts the code and runs tests).
+      #
+      # The key insight: we DON'T install Node.js on the runner. We use Docker
+      # to run the test command inside the container, which already has all
+      # dependencies installed.
+      #
+      # - name: Run tests
+      #   run: docker compose run --rm api npm test
+      #
+      # docker compose run creates a one-off container, runs the command, then
+      # removes it (--rm). No ports/networks needed for testing.
+
+      # ── Step 4: Push to GHCR ───────────────────────────────────────────
+      # Push both tags. The first push uploads the image layers; the second
+      # push (sha-xxx) is just a tag reference — it's near-instant because
+      # the layers are already uploaded.
+      #
+      # This step only makes sense for push events (not PRs). On PRs, this
+      # will fail because the GITHUB_TOKEN only has write access for the
+      # repo's default branch. That's fine — it tells us "image built OK,
+      # would push on merge."
+      - name: Push to GitHub Container Registry
+        run: |
+          IMAGE_NAME=ghcr.io/${{ github.repository_owner }}/task-api
+          docker push $IMAGE_NAME:latest
+          docker push $IMAGE_NAME:sha-${GITHUB_SHA::7}
+
+      # ── Step 5: Deploy to Swarm (future) ──────────────────────────────
+      # ═══════════════════════════════════════════════════════════════════
+      # When you have a server, uncomment this step and add GitHub secrets.
+      #
+      # Secrets needed (set in repo Settings → Secrets and variables → Actions):
+      #   DEPLOY_HOST     — IP or domain of your swarm manager
+      #                    (e.g., "192.168.1.100" or "myserver.com")
+      #   DEPLOY_USER     — SSH username (e.g., "ubuntu", "root", "deploy")
+      #   DEPLOY_SSH_KEY  — Contents of your PRIVATE SSH key (cat ~/.ssh/id_ed25519)
+      #
+      # The appleboy/ssh-action does:
+      #   1. SSH into your server (authenticated with DEPLOY_SSH_KEY)
+      #   2. Run the script block on the remote machine
+      #
+      # The script:
+      #   cd ~/docker-learn    → go to the project directory
+      #   docker pull ...      → pull the latest image from GHCR
+      #   docker stack deploy  → redeploy the stack (triggers rolling update)
+      #
+      # --with-registry-auth is CRITICAL in Swarm:
+      #   Without it, worker nodes can't pull from GHCR because they don't
+      #   have the login credentials. This flag passes the login from the
+      #   manager node to all workers.
+      #
+      # - name: Deploy to Swarm
+      #   if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      #   uses: appleboy/ssh-action@v1
+      #   with:
+      #     host: ${{ secrets.DEPLOY_HOST }}
+      #     username: ${{ secrets.DEPLOY_USER }}
+      #     key: ${{ secrets.DEPLOY_SSH_KEY }}
+      #     script: |
+      #       cd /home/${{ secrets.DEPLOY_USER }}/docker-learn
+      #       docker pull ghcr.io/${{ github.repository_owner }}/task-api:latest
+      #       docker stack deploy -c docker-compose.swarm.yml task-stack --with-registry-auth
+      #
+      # ── Alternative: deploy only on push (not PR) ──────────────────────
+      # The "if" condition above ensures this step runs ONLY on push to main,
+      # NOT on pull_request events. Pull requests trigger the build but don't
+      # push or deploy — this saves time on deployment.
+      #
+      # ── Rolling update behavior ────────────────────────────────────────
+      # docker stack deploy compares the running stack state with the compose
+      # file. If the image tag changed (e.g., task-api:latest now points to a
+      # new digest), Swarm performs a rolling update following the
+      # update_config in docker-compose.swarm.yml:
+      #   parallelism: 1 — update one replica at a time
+      #   delay: 10s     — wait 10s between batches
+      #   order: start-first — zero downtime
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Command reference — testing this workflow locally
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# You can't fully run GitHub Actions locally, but you can verify the Docker
+# commands that the workflow will run:
+#
+#   # Build and tag (same as Step 3):
+#   IMAGE_NAME=ghcr.io/$(whoami)/task-api
+#   docker build -t $IMAGE_NAME:latest .
+#   docker tag $IMAGE_NAME:latest $IMAGE_NAME:sha-$(git rev-parse --short=7 HEAD)
+#
+#   # Push (requires docker login first):
+#   echo $GITHUB_TOKEN | docker login ghcr.io -u $USERNAME --password-stdin
+#   docker push $IMAGE_NAME:latest
+#   docker push $IMAGE_NAME:sha-$(git rev-parse --short=7 HEAD)
+#
+#   # Test the deploy script manually on the swarm manager:
+#   docker pull ghcr.io/$(whoami)/task-api:latest
+#   docker stack deploy -c docker-compose.swarm.yml task-stack --with-registry-auth
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+# GitHub Context Variables Reference
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# ${{ github.repository_owner }}   → "ayaz" (your GitHub username)
+# ${{ github.sha }}                 → full 40-char commit hash
+# ${{ github.actor }}               → username who triggered the run
+# ${{ github.event_name }}          → "push" or "pull_request"
+# ${{ github.ref }}                  → "refs/heads/main"
+# ${{ secrets.GITHUB_TOKEN }}       → auto-generated access token
+#
+# GitHub also sets environment variables (no ${{ }} needed in run: blocks):
+#   GITHUB_SHA     → full commit hash
+#   GITHUB_REF     → "refs/heads/main"
+#   GITHUB_REPOSITORY → "username/repo-name"
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+# GitHub Secrets Reference
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Secrets are encrypted environment variables stored in the repo. They are NOT
+# shown in logs and are masked with *** if accidentally printed.
+#
+# ── Predefined secrets (always available) ──────────────────────────────────
+#
+#   secrets.GITHUB_TOKEN       → Auto-generated per run, scoped by permissions
+#                                Used for: GHCR auth, API calls to GitHub
+#
+# ── Custom secrets (you create in Settings → Secrets and variables → Actions) ─
+#
+#   secrets.DEPLOY_HOST        → IP or domain of your swarm manager
+#   secrets.DEPLOY_USER        → SSH username for deployment
+#   secrets.DEPLOY_SSH_KEY     → Private SSH key for passwordless login
+#
+# ── How to set a custom secret ────────────────────────────────────────────
+#   1. Go to your repo on GitHub
+#   2. Settings → Secrets and variables → Actions
+#   3. Click "New repository secret"
+#   4. Name: DEPLOY_HOST, Value: your-server-ip
+#   5. Repeat for DEPLOY_USER and DEPLOY_SSH_KEY
+#
+# ── Common secret use cases ───────────────────────────────────────────────
+#
+#   DOCKER_USERNAME + DOCKER_PASSWORD
+#     → Docker Hub push (only needed if not using GHCR)
+#
+#   NPM_TOKEN
+#     → npm publish or private npm packages
+#
+#   AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY
+#     → Deploy to EC2, ECS, EKS, S3
+#
+#   DATABASE_URL
+#     → Run integration tests against a real test DB
+#
+#   SLACK_WEBHOOK
+#     → Send deployment notifications to Slack
+#
+#   SONAR_TOKEN
+#     → Upload code quality analysis to SonarQube
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+# GitHub Actions Pre-Built Actions Reference
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# actions/checkout@v4           → Checkout repo code (almost every workflow needs this)
+# actions/setup-node@v4         → Install Node.js (use with: node-version: '24')
+# actions/setup-python@v5       → Install Python
+# docker/login-action@v3        → Log in to container registry (Docker Hub, GHCR, ECR)
+# docker/build-push-action@v6   → Build + push in one step (alternative to raw docker commands)
+# appleboy/ssh-action@v1        → SSH into a server and run commands (deploy)
+# actions/cache@v4              → Cache node_modules, Docker layers, etc. (faster builds)
+# actions/upload-artifact@v4    → Upload build outputs (share between jobs)
+# actions/download-artifact@v4  → Download artifacts from another job
+# slackapi/slack-github-action  → Send Slack notifications
+# softprops/action-gh-release   → Create GitHub releases
+#
+# ═══════════════════════════════════════════════════════════════════════════════

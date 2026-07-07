@@ -1,0 +1,364 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# docker-compose.swarm.yml — Docker Swarm stack: API + Redis + Nginx
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# ── What's different from docker-compose.yml? ──────────────────────────────
+# This file is designed for `docker stack deploy` (Swarm mode), NOT `docker compose up`.
+# Key differences:
+#
+#   1. No `build:` — Swarm requires PRE-BUILT images. You must build first:
+#        docker build -t task-api .
+#      Then deploy:
+#        docker stack deploy -c docker-compose.swarm.yml task-stack
+#
+#   2. No `profiles:` — Swarm doesn't support profiles. All services deploy every time.
+#
+#   3. No `container_name:` — Swarm generates container names per replica (ignored).
+#      No `restart:` — Swarm uses deploy.restart_policy instead (ignored).
+#      No `depends_on` with conditions — Swarm ignores them (services start in parallel).
+#
+#   4. `deploy.resources` is NATIVE to Swarm (no --compatibility flag needed).
+#      `deploy.replicas`, `deploy.update_config`, `deploy.restart_policy` only work in Swarm.
+#
+#   5. Volumes with RELATIVE HOST PATHS are NOT allowed in Swarm (must use absolute paths
+#      or named volumes/configs).
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── Architecture ──────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+#   Routing Mesh ──:8080──→ │ nginx │ ──:3000──→ │ api (x2) │ ──:6379──→ │ redis │
+#                           (entry point)         (2 replicas)           (single)
+#
+# The Swarm routing mesh listens on port 8080 of EVERY node in the cluster and
+# routes traffic to a healthy nginx task. Nginx then proxies to the api service
+# (Swarm's internal DNS load-balances across the 2 replicas round-robin).
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── Deploy commands ───────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+#   # 0. Prerequisites: initialize Swarm (one-time)
+#   docker swarm init
+#
+#   # 1. Build the api image (required — Swarm doesn't support build:)
+#   docker build -t task-api .
+#
+#   # 2. Deploy (or update) the stack
+#   docker stack deploy -c docker-compose.swarm.yml task-stack
+#
+#   # 3. Check stack status
+#   docker stack services task-stack            # Summary: replicas, ports
+#   docker stack ps task-stack                   # Per-task details + node placement
+#   docker service ls                            # All services across all stacks
+#
+#   # 4. Check individual service / task details
+#   docker service logs task-stack_api           # Logs from all api replicas
+#   docker service ps task-stack_api             # Task-level status for api
+#   docker service inspect task-stack_api        # Full service config
+#   docker service inspect task-stack_api --pretty  # Human-readable config
+#
+#   # 5. Scale a service (without editing the file)
+#   docker service scale task-stack_api=3
+#
+#   # 6. Rolling update (see update_config below)
+#   docker service update --image task-api:new-version task-stack_api
+#   # Swarm follows update_config: 1 at a time, 10s gap between batches
+#
+#   # 7. Force re-deploy (restart with same image)
+#   docker service update --force task-stack_api
+#
+#   # 8. Remove the entire stack
+#   docker stack rm task-stack
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── Swarm networking — how services discover each other ───────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Docker Swarm creates an overlay network (task-stack_default) that spans all nodes.
+# Containers join it automatically. Service discovery uses Docker DNS (127.0.0.11):
+#
+#   - nginx resolves "api" → Swarm VIP → load balanced across healthy replicas
+#   - api resolves "redis" → Swarm VIP → routes to the single redis container
+#
+# Services are reachable by their service name from within the overlay network.
+# The routing mesh (ingress mode) makes PublishedPorts available on every node.
+#
+# ── Important caveat ───────────────────────────────────────────────────────
+# nginx resolves "api" ONCE at startup and caches the IP. If api replicas
+# change (scale, restart, fail over), nginx may still hit the old VIP.
+# Fix: add a resolver with valid TTL in the nginx config.
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── Resource limits in Swarm ──────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# In Swarm mode, deploy.resources.limits is NATIVE (no --compatibility needed).
+#   - CPU exceeded → container is THROTTLED (slower, not killed)
+#   - Memory exceeded → container is OOM-KILLED
+#
+# deploy.resources.reservations:
+#   - Guarantees the container will have at least this much available
+#   - Scheduler uses this to decide which node can fit the container
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── Rolling updates (zero-downtime deploys) ───────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# update_config controls how Swarm rolls out new versions:
+#
+#   parallelism: 1     — Update ONE replica at a time (keep others serving)
+#   delay: 10s         — Wait 10s between batches (let healthchecks stabilize)
+#   failure_action: pause  — Stop rolling if a replica fails (default)
+#   order: start-first — Start new container BEFORE stopping old (default)
+#                        Alternative: stop-first (stop old, then start new)
+#   monitor: 5s        — How long to monitor each update for health failures
+#
+# ── Step-by-step walkthrough (parallelism: 1, order: start-first) ─────────
+#
+#   Before: [api v1] [api v1]     ← 2 replicas serving traffic
+#
+#   Step 1: [api v1] [api v2*]   ← Start 1 new v2 container
+#                                  Wait for v2 healthcheck to pass
+#   Step 2: [api v1] [api v2]     ← Stop the old v1 container
+#                                  Wait 10s (delay)
+#   Step 3: [api v2*] [api v2]    ← Start the second v2 container
+#                                  Wait for healthcheck
+#   Step 4: [api v2] [api v2]     ← Stop the second v1 container
+#   Done.                          ← All updated, no downtime
+#
+# ── parallelism: 2 (faster but riskier) ────────────────────────────────────
+#
+#   Before: [api v1] [api v1]
+#   Step 1: [api v2*] [api v2*]   ← Both start at once
+#                                  If both fail → total outage
+#   Step 2: [api v2] [api v2]     ← Both old stopped
+#
+# Visual analogy:
+#   parallelism: 1  →  Change 1 tire at a time, car stays on jacks
+#   parallelism: 3  →  Change 3 tires at once, car might tip over
+#   delay: 0s       →  No pause, rush job
+#   delay: 10s      →  Check each tire is tight before moving on
+#
+# To trigger a rolling update:
+#   docker service update --image task-api:v2 task-stack_api
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── Restart policy in Swarm ───────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# The restart: unless-stopped key is IGNORED in Swarm. Use deploy.restart_policy:
+#
+#   condition: on-failure  — Only restart if container exits non-zero
+#               any        — Always restart (default)
+#               none       — Never restart
+#   delay: 5s              — Wait 5s before restarting
+#   max_attempts: 3        — Give up after 3 failed restarts
+#   window: 120s           — If container stays up for 120s, reset attempt counter
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── Logging in Swarm ──────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Same as regular Compose. json-file with rotation. Each replica writes its own
+# logs. Use `docker service logs task-stack_api` to stream all replica logs.
+# For production, use a centralized log driver (gelf, fluentd, awslogs).
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+
+services:
+
+  # ── redis ──────────────────────────────────────────────────────────────────
+  # In-memory cache used by the API.
+  # Single replica — Redis data must be in a shared volume or replicated separately.
+  # No host ports exposed — purely internal (only api can reach it).
+  redis:
+    image: redis:7-alpine
+    container_name: task-redis       # Ignored in Swarm (auto-names per replica)
+    restart: unless-stopped           # Ignored in Swarm (use deploy.restart_policy)
+
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ── api ────────────────────────────────────────────────────────────────────
+  # Node.js/Express app with SQLite + Redis caching.
+  # 2 replicas for high availability.
+  # SQLite data is shared via the task-data named volume.
+  #
+  # WARNING: SQLite is NOT designed for concurrent write access from multiple
+  # replicas. In production, replace with PostgreSQL or use a read-replica pattern.
+  # For learning Swarm, 2 replicas are fine for read-heavy workloads.
+  api:
+    image: task-api:latest            # Must be pre-built with `docker build -t task-api .`
+    container_name: task-api           # Ignored in Swarm
+    restart: unless-stopped            # Ignored in Swarm
+
+    environment:
+      REDIS_URL: redis://redis:6379
+
+    volumes:
+      - task-data:/app/data
+
+    deploy:
+      replicas: 2                     # Run 2 copies for HA
+      resources:
+        limits:
+          cpus: "0.7"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 128M
+
+      # ── Rolling update config ──────────────────────────────────────────
+      update_config:
+        parallelism: 1                # Update 1 replica at a time
+        delay: 10s                    # Wait 10s between batches
+        order: start-first            # Start new container before stopping old
+        failure_action: pause         # Stop if a replica fails healthcheck
+        monitor: 5s                   # Monitor each update for 5s
+
+      # ── Restart policy ─────────────────────────────────────────────────
+      restart_policy:
+        condition: on-failure         # Restart only if it crashes
+        delay: 5s                     # Wait 5s before restart attempt
+        max_attempts: 3               # Give up after 3 failed restarts
+        window: 120s                  # Reset attempt counter after 2min uptime
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    depends_on:
+      - redis                         # Ignored in Swarm (all start in parallel)
+
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/').then(r => process.exit(r.ok?0:1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ── nginx ──────────────────────────────────────────────────────────────────
+  # Reverse proxy: entry point for all external traffic.
+  # Swarm routing mesh makes this available on port 8080 of every node.
+  # Proxies to the api service (Swarm DNS load-balances across all replicas).
+  nginx:
+    image: nginx:alpine
+    container_name: task-nginx         # Ignored in Swarm
+    restart: unless-stopped            # Ignored in Swarm
+
+    volumes:
+      # ABSOLUTE PATH required — relative paths are NOT supported in Swarm
+      - /home/ayaz/coding/docker-learn/nginx/nginx.conf:/etc/nginx/conf.d/default.conf
+
+    ports:
+      - "8080:80"                     # Swarm routing mesh: publish 8080 → container 80
+
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    depends_on:
+      - api                            # Ignored in Swarm
+
+# ── volumes ─────────────────────────────────────────────────────────────────
+volumes:
+  task-data:
+  redis-data:
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Frequently used commands
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Build and deploy:
+#   docker build -t task-api . && docker stack deploy -c docker-compose.swarm.yml task-stack
+#
+# Inspect:
+#   docker stack services task-stack        # Replicas, ports, image
+#   docker stack ps task-stack              # Per-task node placement + status
+#   docker service ps task-stack_api        # Task-level for a specific service
+#   docker service inspect task-stack_api   # Full config JSON
+#   docker service logs task-stack_api      # Stream logs from all api replicas
+#
+# Scaling:
+#   docker service scale task-stack_api=3   # Scale to 3 replicas
+#   docker service scale task-stack_nginx=2 # Scale nginx too
+#
+# Rolling update (zero-downtime deploy):
+#   docker build -t task-api:v2 .                                    # New image
+#   docker service update --image task-api:v2 task-stack_api         # Rolling update
+#   docker service update --image task-api:v2 --update-parallelism 2 task-stack_api
+#
+# Force restart:
+#   docker service update --force task-stack_api                     # Re-deploy same image
+#
+# Remove:
+#   docker stack rm task-stack
+#
+# Tear down everything (including volumes):
+#   docker stack rm task-stack && docker volume prune -f
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+# Useful inspect commands
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+#   docker service inspect task-stack_api --format '{{.Endpoint.VirtualIPs}}'
+#     → Shows the VIP assigned to the api service
+#
+#   docker service inspect task-stack_api --format '{{.UpdateStatus}}'
+#     → Shows current rolling update status (if any)
+#
+#   docker node ls
+#     → List all nodes in the Swarm
+#
+#   docker node inspect self --format '{{.Status.Addr}}'
+#     → Get this node's IP address
+#
+#   docker network ls --filter scope=swarm
+#     → List all overlay networks
+#
+#   docker network inspect task-stack_default
+#     → Inspect the overlay network created for this stack
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+# healthcheck notes
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# The api healthcheck uses node's built-in fetch (available from Node 18+).
+# It sends GET / and checks if the response is OK.
+# Swarm uses healthcheck status to:
+#   - Route traffic only to healthy replicas (via VIP / DNS load balancing)
+#   - Decide whether a rolling update succeeded
+#   - Replace unhealthy containers (restart_policy)
+#
+# The redis healthcheck uses redis-cli incr ping.
+# "incr ping" increments a key named "ping" and returns the new value.
+# Any valid redis command returning a value works — "PING" alone returns "PONG".
+# ═══════════════════════════════════════════════════════════════════════════════
